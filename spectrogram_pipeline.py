@@ -449,6 +449,15 @@ def extract_zip(zip_path: str | Path, extract_to: str | Path) -> Path:
     extract_to.mkdir(parents=True, exist_ok=True)
 
     with zipfile.ZipFile(zip_path, "r") as zip_ref:
+        top_level_dirs = set()
+        for zip_info in zip_ref.infolist():
+            path_parts = Path(zip_info.filename).parts
+            if path_parts and (zip_info.is_dir() or len(path_parts) > 1):
+                top_level_dirs.add(path_parts[0])
+
         zip_ref.extractall(extract_to)
+
+    if len(top_level_dirs) == 1:
+        return extract_to / next(iter(top_level_dirs))
 
     return extract_to
