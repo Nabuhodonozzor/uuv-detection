@@ -13,6 +13,7 @@ from keras import callbacks, layers, metrics, models, optimizers
 from sklearn.metrics import classification_report, f1_score
 from sklearn.model_selection import train_test_split
 
+kaggle_token = "KGAT_13e99a89ce99374acab577737d175634"
 
 CLASSES = [
     "ArtificialSignals",
