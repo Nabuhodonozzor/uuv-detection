@@ -22,13 +22,24 @@ CLASSES = [
 
 
 def configure_kaggle_access(secret_name: str = "COLAB") -> Path:
-    """Write the Kaggle token stored in a Colab secret for the Kaggle CLI."""
+    """Use an existing Kaggle CLI credential or provision one from a Colab secret."""
+    token_path = Path("/root/.kaggle/access_token")
+    if token_path.exists():
+        return token_path
+
     try:
         from google.colab import userdata
+        from google.colab.userdata import TimeoutException
     except ImportError as exc:
         raise RuntimeError("Kaggle credential setup is only available in Google Colab.") from exc
 
-    kaggle_token = userdata.get(secret_name)
+    try:
+        kaggle_token = userdata.get(secret_name)
+    except TimeoutException as exc:
+        raise RuntimeError(
+            "Colab secrets are only available when the notebook runs from the Colab browser UI. "
+            "Open the notebook in colab.research.google.com and run this cell there."
+        ) from exc
     if not kaggle_token:
         raise RuntimeError(f"Set the {secret_name!r} Colab secret before downloading the dataset.")
 
