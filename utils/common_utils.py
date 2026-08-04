@@ -186,12 +186,24 @@ def train_keras_models_for_variants(
     return histories
 
 
+def predict_model_probabilities(model: Any, x_data: np.ndarray, binary: bool = False) -> np.ndarray:
+    """Return probability-like scores from either a scikit-learn or Keras model."""
+    if hasattr(model, "predict_proba"):
+        scores = np.asarray(model.predict_proba(x_data))
+    else:
+        try:
+            scores = np.asarray(model.predict(x_data, verbose=0))
+        except TypeError:
+            scores = np.asarray(model.predict(x_data))
+
+    if binary and scores.ndim == 2 and scores.shape[1] == 2:
+        return scores[:, 1]
+    return scores
+
+
 def evaluate_multilabel_model(model: Any, x_test: np.ndarray, y_test: np.ndarray, class_names: list[str], title: str) -> dict:
     print(f"\n{'=' * 50}\n--- Evaluation for: {title} ---\n{'=' * 50}\n")
-    try:
-        y_prob = model.predict(x_test, verbose=0)
-    except TypeError:
-        y_prob = model.predict(x_test)
+    y_prob = predict_model_probabilities(model, x_test)
     y_pred = (y_prob >= 0.5).astype(int)
     print(classification_report(y_test, y_pred, target_names=class_names, zero_division=0))
     print("Micro F1:", f1_score(y_test, y_pred, average="micro", zero_division=0))
@@ -202,10 +214,7 @@ def evaluate_multilabel_model(model: Any, x_test: np.ndarray, y_test: np.ndarray
 
 def evaluate_binary_model(model: Any, x_test: np.ndarray, y_test: np.ndarray, title: str) -> dict:
     print(f"\n{'=' * 50}\n--- Evaluation for: {title} ---\n{'=' * 50}\n")
-    try:
-        y_prob = model.predict(x_test, verbose=0).ravel()
-    except TypeError:
-        y_prob = model.predict(x_test).ravel()
+    y_prob = predict_model_probabilities(model, x_test, binary=True).ravel()
     y_true, y_pred = np.asarray(y_test).ravel().astype(int), (y_prob >= 0.5).astype(int)
     print(classification_report(y_true, y_pred, labels=[0, 1], target_names=["No UUV", "UUV"], zero_division=0))
     report = classification_report(y_true, y_pred, labels=[0, 1], target_names=["No UUV", "UUV"], output_dict=True, zero_division=0)
