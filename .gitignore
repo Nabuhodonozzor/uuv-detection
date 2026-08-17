@@ -1,3 +1,7 @@
 __pycache__/
 saved_artifacts/
 *_models_and_results_*.zip
+mfcc_datasets/
+mfcc10.npz
+mfcc20.npz
+mfcc40.npz

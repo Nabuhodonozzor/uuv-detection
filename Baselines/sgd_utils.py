@@ -1,4 +1,7 @@
 from pathlib import Path
+from typing import Any
+
+import json
 
 import joblib
 import numpy as np
@@ -16,30 +19,34 @@ def flatten_mfcc_features(mfccs: np.ndarray) -> np.ndarray:
     return mfccs.reshape(mfccs.shape[0], -1)
 
 
-def build_sgd_models_for_variants(variants: DatasetVariants, model_type: str) -> dict[str, Pipeline]:
+def build_sgd_model(model_type: str, early_stopping: bool = True) -> Pipeline:
     if model_type not in {"multilabel", "binary"}:
         raise ValueError("model_type must be either 'multilabel' or 'binary'")
+    classifier = SGDClassifier(
+        loss="log_loss",
+        class_weight="balanced",
+        early_stopping=early_stopping,
+        n_iter_no_change=5,
+        max_iter=1_000,
+        tol=1e-3,
+        average=True,
+        random_state=42,
+    )
+    if model_type == "multilabel":
+        classifier = OneVsRestClassifier(classifier, n_jobs=1)
+    return Pipeline([
+        ("flatten", FunctionTransformer(flatten_mfcc_features, validate=False)),
+        ("scale", StandardScaler()),
+        ("classifier", classifier),
+    ])
 
-    def build_model() -> Pipeline:
-        classifier = SGDClassifier(
-            loss="log_loss",
-            class_weight="balanced",
-            early_stopping=True,
-            n_iter_no_change=5,
-            max_iter=1_000,
-            tol=1e-3,
-            average=True,
-            random_state=42,
-        )
-        if model_type == "multilabel":
-            classifier = OneVsRestClassifier(classifier, n_jobs=-1)
-        return Pipeline([
-            ("flatten", FunctionTransformer(flatten_mfcc_features, validate=False)),
-            ("scale", StandardScaler()),
-            ("classifier", classifier),
-        ])
 
-    return {variant_name: build_model() for variant_name in ("normal", "M", "W")}
+def build_sgd_models_for_variants(variants: DatasetVariants, model_type: str) -> dict[str, Pipeline]:
+    return {variant_name: build_sgd_model(model_type) for variant_name in ("normal", "M", "W")}
+
+
+def build_final_sgd_model(model_type: str) -> Pipeline:
+    return build_sgd_model(model_type, early_stopping=False)
 
 
 def train_sgd_models_for_variants(models_by_variant: dict[str, Pipeline], variants: DatasetVariants, model_type: str) -> dict[str, Pipeline]:
@@ -57,6 +64,9 @@ def save_sgd_artifacts(
     binary_models: dict[str, Pipeline],
     multilabel_results: pd.DataFrame,
     binary_results: pd.DataFrame,
+    cv_results: pd.DataFrame | None = None,
+    cv_summary: pd.DataFrame | None = None,
+    split_metadata: dict[str, Any] | None = None,
 ) -> Path:
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -66,4 +76,11 @@ def save_sgd_artifacts(
         joblib.dump(model, save_dir / f"sgd_bin_model_{dataset_key}_{variant_name}.joblib")
     multilabel_results.to_csv(save_dir / f"sgd_uuv_evaluation_results_{dataset_key}.csv", index=False)
     binary_results.to_csv(save_dir / f"sgd_binary_uuv_evaluation_results_{dataset_key}.csv", index=False)
+    if cv_results is not None:
+        cv_results.to_csv(save_dir / f"sgd_cross_validation_results_{dataset_key}.csv", index=False)
+    if cv_summary is not None:
+        cv_summary.to_csv(save_dir / f"sgd_cross_validation_summary_{dataset_key}.csv", index=False)
+    if split_metadata is not None:
+        with open(save_dir / f"dataset_split_{dataset_key}.json", "w", encoding="utf-8") as file_obj:
+            json.dump(split_metadata, file_obj, indent=2, sort_keys=True)
     return save_dir

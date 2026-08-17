@@ -36,7 +36,6 @@ def build_mfcc_cnn(input_shape: tuple[int, int], model_type: str = "multilabel",
 def get_mfcc_cnn_callbacks() -> list[callbacks.Callback]:
     return [
         callbacks.EarlyStopping(monitor="val_loss", patience=8, restore_best_weights=True),
-        callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=4, min_lr=1e-6),
     ]
 
 
