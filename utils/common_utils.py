@@ -276,8 +276,8 @@ def _validate_mfcc_archive(data: Any, data_path: Path) -> None:
         raise ValueError("The class order in the MFCC archive does not match CLASSES.")
 
     n_folds = int(data["n_folds"].item())
-    if n_folds != 5:
-        raise ValueError(f"Expected exactly 5 CV folds, got {n_folds}.")
+    if n_folds != 4:
+        raise ValueError(f"Expected exactly 4 grouped CV folds, got {n_folds}.")
     if str(data["group_key"].item()) != "timestamp_raw":
         raise ValueError("MFCC folds must be grouped by timestamp_raw.")
     split_ratios = np.asarray(data["split_ratios"], dtype=np.float32)

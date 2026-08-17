@@ -312,14 +312,17 @@ def _assignment_score(
 
 def assign_test_and_folds(
     records: list[AudioRecord],
-    n_splits: int = 5,
+    n_splits: int = 4,
     test_size: float = 0.2,
     seed: int = 42,
     candidate_count: int = 2048,
 ) -> tuple[dict[str, str], str, dict[str, object]]:
     """Assign complete timestamp groups to one test bucket or one CV fold."""
-    if n_splits != 5:
-        raise ValueError("QiandaoEar22 experiments use exactly 5 CV folds.")
+    if n_splits != 4:
+        raise ValueError(
+            "This QiandaoEar22 subset requires exactly 4 CV folds because UUV-M "
+            "occurs in only 5 timestamp groups (one is reserved for the test set)."
+        )
     if not 0 < test_size < 1:
         raise ValueError("test_size must be between 0 and 1.")
 
@@ -471,7 +474,7 @@ def create_mfcc_archive(
     split_id: str,
     output_path: str | Path,
     n_mfcc: int,
-    n_splits: int = 5,
+    n_splits: int = 4,
     dataset_diagnostics: Optional[dict[str, object]] = None,
 ) -> Path:
     """Extract one MFCC configuration and save its fixed test/CV assignment."""
@@ -560,7 +563,7 @@ def create_mfcc_archive(
 def build_all_mfcc_archives(
     dataset_dirs: Iterable[str | Path],
     output_dir: str | Path,
-    n_splits: int = 5,
+    n_splits: int = 4,
     seed: int = 42,
 ) -> list[Path]:
     records = discover_audio_records(dataset_dirs)
@@ -594,7 +597,7 @@ def parse_args() -> argparse.Namespace:
         help="Audio dataset directory. Repeat this option for every source directory.",
     )
     parser.add_argument("--output-dir", default="mfcc_datasets")
-    parser.add_argument("--n-splits", type=int, default=5)
+    parser.add_argument("--n-splits", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
