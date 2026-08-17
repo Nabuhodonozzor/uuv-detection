@@ -421,7 +421,11 @@ def assign_test_and_folds(
     }.items():
         if np.any(actual_labels[:, label_index] == 0) or np.any(negative_counts == 0):
             raise ValueError(
-                f"Every test/CV bucket must contain positive and negative samples for UUV-{variant_name}."
+                f"Every test/CV bucket must contain positive and negative samples for UUV-{variant_name}. "
+                f"Positive timestamp groups: {int(group_support[label_index])}; "
+                f"positive samples by [test, fold_0..fold_{n_splits - 1}]: "
+                f"{actual_labels[:, label_index].astype(int).tolist()}; "
+                f"negative samples: {negative_counts.astype(int).tolist()}."
             )
 
     bucket_names = ["test"] + [f"fold_{fold}" for fold in range(n_splits)]
