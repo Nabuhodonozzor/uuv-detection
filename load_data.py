@@ -14,8 +14,8 @@ import numpy as np
 
 CLASSES = [
     "ArtificialSignals", "BigPassengerShip", "Cargo", "FishBoat", "GreenCity",
-    "KaiYan", "KaiYuan", "MotorBoat", "No7", "PoliceBoat", "QianDao",
-    "SpeedBoat", "TheEarl", "TheKnight", "UUV", "Unknown", "WorkShip",
+    "KaiYan", "KaiYuan", "MotorBoat", "No7", "No5", "PoliceBoat", "QianDao",
+    "SpeedBoat", "TheEarl", "TheKnight", "UUV", "Unknown", "WorkShip", "Helicopter", "CivilianBoats", "Car"
 ]
 
 TARGET_MODE_MAP = {"S": "single", "M": "multiple"}
