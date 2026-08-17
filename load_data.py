@@ -84,19 +84,23 @@ def parse_audio_filename(filename: str) -> AudioLabel:
     targets: List[TargetInfo] = []
     for raw_target in "_".join(parts[2:]).split("&"):
         target_parts = raw_target.split("_")
-        if len(target_parts) >= 3:
+
+        # Some files append a numeric metadata field after the target description.
+        while len(target_parts) > 1 and target_parts[-1].isdigit():
+            target_parts.pop()
+
+        if (
+            len(target_parts) >= 3
+            and target_parts[-2] in DISTANCE_MAP
+            and target_parts[-1] in AUDIBILITY_MAP
+        ):
             name = "_".join(target_parts[:-2])
             distance_code = target_parts[-2]
             audibility_code = target_parts[-1]
-            distance = DISTANCE_MAP.get(distance_code, "unknown")
-            audibility = AUDIBILITY_MAP.get(audibility_code, "unknown")
-        elif len(target_parts) == 2:
-            name, distance_code = target_parts
-            audibility_code = ""
-            distance = DISTANCE_MAP.get(distance_code, "unknown")
-            audibility = "unknown"
+            distance = DISTANCE_MAP[distance_code]
+            audibility = AUDIBILITY_MAP[audibility_code]
         else:
-            name = raw_target
+            name = "_".join(target_parts)
             distance_code = ""
             audibility_code = ""
             distance = "unknown"
