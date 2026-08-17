@@ -17,8 +17,8 @@ from sklearn.model_selection import train_test_split
 
 CLASSES = [
     "ArtificialSignals", "BigPassengerShip", "Cargo", "FishBoat", "GreenCity",
-    "KaiYan", "KaiYuan", "MotorBoat", "No7", "PoliceBoat", "QianDao",
-    "SpeedBoat", "TheEarl", "TheKnight", "UUV", "Unknown", "WorkShip",
+    "KaiYan", "KaiYuan", "MotorBoat", "No7", "No5", "PoliceBoat", "QianDao",
+    "SpeedBoat", "TheEarl", "TheKnight", "UUV", "Unknown", "WorkShip", "Helicopter", "CivilianBoats", "Car"
 ]
 
 
