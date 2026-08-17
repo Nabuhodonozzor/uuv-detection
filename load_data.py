@@ -215,7 +215,7 @@ def discover_audio_records(dataset_dirs: Iterable[str | Path]) -> list[AudioReco
 
 def _group_statistics(
     records: list[AudioRecord],
-) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray, dict[str, object]]:
     groups: dict[str, list[AudioRecord]] = {}
     for record in records:
         groups.setdefault(record.label.timestamp_raw, []).append(record)
@@ -224,6 +224,9 @@ def _group_statistics(
     group_sizes = np.asarray([len(groups[timestamp]) for timestamp in timestamps])
     label_counts = []
     label_group_support = []
+    duplicate_timestamp_count = 0
+    duplicate_part_count = 0
+    duplicate_examples: list[dict[str, object]] = []
     for timestamp in timestamps:
         group_records = groups[timestamp]
         counts = np.sum([record.labels_multi for record in group_records], axis=0)
@@ -237,19 +240,53 @@ def _group_statistics(
         label_counts.append(counts)
         label_group_support.append(counts > 0)
 
-        part_numbers = [
-            record.label.recording_number
-            for record in group_records
-            if record.label.recording_number is not None
-        ]
-        if len(part_numbers) != len(set(part_numbers)):
-            raise ValueError(
-                f"Timestamp {timestamp} contains duplicate part numbers."
+        records_by_part: dict[int, list[AudioRecord]] = {}
+        for record in group_records:
+            if record.label.recording_number is not None:
+                records_by_part.setdefault(record.label.recording_number, []).append(record)
+        duplicate_parts = {
+            part_number: part_records
+            for part_number, part_records in records_by_part.items()
+            if len(part_records) > 1
+        }
+        if duplicate_parts:
+            duplicate_timestamp_count += 1
+            duplicate_part_count += sum(
+                len(part_records) - 1 for part_records in duplicate_parts.values()
             )
+            for part_number, part_records in duplicate_parts.items():
+                if len(duplicate_examples) >= 5:
+                    break
+                duplicate_examples.append(
+                    {
+                        "timestamp": timestamp,
+                        "recording_number": part_number,
+                        "filenames": [record.path.name for record in part_records[:5]],
+                    }
+                )
 
     group_label_counts = np.asarray(label_counts, dtype=np.float64)
     group_support = np.sum(label_group_support, axis=0)
-    return timestamps, group_sizes, group_label_counts, group_support
+    diagnostics = {
+        "audio_file_count": len(records),
+        "timestamp_group_count": len(timestamps),
+        "timestamps_with_duplicate_part_numbers": duplicate_timestamp_count,
+        "duplicate_part_number_occurrences": duplicate_part_count,
+        "duplicate_part_number_examples": duplicate_examples,
+    }
+    if duplicate_part_count:
+        print(
+            "Warning: duplicate part numbers were found within "
+            f"{duplicate_timestamp_count} timestamp groups "
+            f"({duplicate_part_count} additional occurrences). "
+            "All files will be preserved and grouped by timestamp."
+        )
+        for example in duplicate_examples:
+            print(
+                f"  {example['timestamp']} part {example['recording_number']}: "
+                f"{example['filenames']}"
+            )
+    return timestamps, group_sizes, group_label_counts, group_support, diagnostics
 
 
 def _assignment_score(
@@ -279,14 +316,16 @@ def assign_test_and_folds(
     test_size: float = 0.2,
     seed: int = 42,
     candidate_count: int = 2048,
-) -> tuple[dict[str, str], str]:
+) -> tuple[dict[str, str], str, dict[str, object]]:
     """Assign complete timestamp groups to one test bucket or one CV fold."""
     if n_splits != 5:
         raise ValueError("QiandaoEar22 experiments use exactly 5 CV folds.")
     if not 0 < test_size < 1:
         raise ValueError("test_size must be between 0 and 1.")
 
-    timestamps, group_sizes, group_labels, group_support = _group_statistics(records)
+    timestamps, group_sizes, group_labels, group_support, diagnostics = (
+        _group_statistics(records)
+    )
     bucket_count = n_splits + 1
     if len(timestamps) < bucket_count:
         raise ValueError(
@@ -409,7 +448,7 @@ def assign_test_and_folds(
     print(f"Timestamp groups: {len(timestamps)}")
     print(f"Samples per bucket: {counts}")
     print(f"Split ID: {split_id}")
-    return sample_assignment, split_id
+    return sample_assignment, split_id, diagnostics
 
 
 def _stack_features(features: list[np.ndarray], split_name: str) -> np.ndarray:
@@ -429,6 +468,7 @@ def create_mfcc_archive(
     output_path: str | Path,
     n_mfcc: int,
     n_splits: int = 5,
+    dataset_diagnostics: Optional[dict[str, object]] = None,
 ) -> Path:
     """Extract one MFCC configuration and save its fixed test/CV assignment."""
     cv_records = [record for record in records if assignment[record.sample_id] != "test"]
@@ -502,6 +542,9 @@ def create_mfcc_archive(
         split_id=np.asarray(split_id),
         split_ratios=split_ratios,
         group_key=np.asarray("timestamp_raw"),
+        dataset_diagnostics_json=np.asarray(
+            json.dumps(dataset_diagnostics or {}, sort_keys=True)
+        ),
         feature_config_json=np.asarray(json.dumps(feature_config, sort_keys=True)),
         format_version=np.asarray(FEATURE_FORMAT_VERSION),
     )
@@ -518,7 +561,7 @@ def build_all_mfcc_archives(
 ) -> list[Path]:
     records = discover_audio_records(dataset_dirs)
     print(f"Loaded metadata for {len(records)} audio files.")
-    assignment, split_id = assign_test_and_folds(
+    assignment, split_id, dataset_diagnostics = assign_test_and_folds(
         records, n_splits=n_splits, test_size=0.2, seed=seed
     )
     output_dir = Path(output_dir)
@@ -530,6 +573,7 @@ def build_all_mfcc_archives(
             output_dir / f"mfcc{n_mfcc}.npz",
             n_mfcc=n_mfcc,
             n_splits=n_splits,
+            dataset_diagnostics=dataset_diagnostics,
         )
         for n_mfcc in (10, 20, 40)
     ]
