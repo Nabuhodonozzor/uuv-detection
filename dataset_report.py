@@ -26,16 +26,25 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Iterable
 
-from load_data import CLASSES, AudioRecord, discover_audio_records
+from load_data import CLASSES, AudioRecord, assign_sessions, discover_audio_records
+
+
+_SESSION_OF: dict[str, str] = {}
 
 
 def _recording_id(record: AudioRecord) -> str:
-    """The grouping key used by the split. Must identify a source recording."""
-    return record.label.timestamp_raw
+    """The grouping key used by the split: the continuous recording session.
+
+    Not the timestamp. Timestamps are ~5-minute slices of a continuous session,
+    so consecutive timestamps hold audio recorded seconds apart.
+    """
+    return _SESSION_OF[record.label.timestamp_raw]
 
 
 def summarize(records: list[AudioRecord]) -> dict[str, object]:
-    """Compute clip counts and, more importantly, recording counts per class."""
+    """Compute clip counts and, more importantly, session counts per class."""
+    _SESSION_OF.clear()
+    _SESSION_OF.update(assign_sessions(records))
     by_recording: dict[str, list[AudioRecord]] = defaultdict(list)
     for record in records:
         by_recording[_recording_id(record)].append(record)
@@ -94,6 +103,7 @@ def summarize(records: list[AudioRecord]) -> dict[str, object]:
     return {
         "clip_count": len(records),
         "recording_count": len(by_recording),
+        "timestamp_group_count": len({r.label.timestamp_raw for r in records}),
         "clips_per_recording_min": sizes[0],
         "clips_per_recording_median": sizes[len(sizes) // 2],
         "clips_per_recording_max": sizes[-1],
@@ -107,7 +117,8 @@ def summarize(records: list[AudioRecord]) -> dict[str, object]:
 
 def print_report(summary: dict[str, object]) -> None:
     print(f"Clips:                 {summary['clip_count']}")
-    print(f"Source recordings:     {summary['recording_count']}")
+    print(f"Timestamp groups:      {summary['timestamp_group_count']}  (~5 min each, NOT independent)")
+    print(f"Continuous sessions:   {summary['recording_count']}  <- the real grouping unit")
     print(
         "Clips per recording:   "
         f"min={summary['clips_per_recording_min']} "
@@ -144,16 +155,54 @@ def print_report(summary: dict[str, object]) -> None:
         )
 
     print()
+    if summary["duplicate_part_numbers"]:
+        print(
+            f"{summary['duplicate_part_numbers']} of {summary['clip_count']} clips share a "
+            "(timestamp, part) pair with\n"
+            "  another clip. Either the part number is not a per-clip index, or the same\n"
+            "  audio segment is stored more than once. Re-run with --show-duplicates to\n"
+            "  see filenames and decide which.\n"
+        )
+
     print("How to read this: the 'recordings' column is the effective sample size")
     print("for generalisation. A class with 1900 clips from 10 recordings gives a")
     print("model 10 independent examples, not 1900. Confidence intervals on any")
     print("held-out score should be computed over recordings, never over clips.")
 
 
-def main(dataset_dirs: Iterable[str | Path], json_path: str | Path | None) -> None:
+def show_duplicates(records: list[AudioRecord], limit: int = 5) -> None:
+    """Print filenames that share a (timestamp, part) pair.
+
+    If the names differ only in their target list, the part number is a label
+    index rather than a clip index and nothing is duplicated. If the names are
+    identical apart from a directory, the same audio really is stored twice and
+    the effective dataset size is smaller than the clip count suggests.
+    """
+    groups: dict[tuple[str, object], list[AudioRecord]] = defaultdict(list)
+    for record in records:
+        if record.label.recording_number is not None:
+            groups[(record.label.timestamp_raw, record.label.recording_number)].append(record)
+
+    shown = 0
+    for key, group in sorted(groups.items()):
+        if len(group) < 2 or shown >= limit:
+            continue
+        print(f"\ntimestamp {key[0]}, part {key[1]} -> {len(group)} files:")
+        for record in group[:6]:
+            print(f"    {record.path.name}")
+        shown += 1
+
+
+def main(
+    dataset_dirs: Iterable[str | Path],
+    json_path: str | Path | None,
+    show_duplicate_examples: bool = False,
+) -> None:
     records = discover_audio_records(dataset_dirs)
     summary = summarize(records)
     print_report(summary)
+    if show_duplicate_examples:
+        show_duplicates(records)
     if json_path is not None:
         Path(json_path).write_text(
             json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8"
@@ -165,9 +214,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dataset-dir", action="append", required=True)
     parser.add_argument("--json", default=None, help="Also write the summary as JSON.")
+    parser.add_argument(
+        "--show-duplicates",
+        action="store_true",
+        help="Print filenames sharing a (timestamp, part) pair.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    main(args.dataset_dir, args.json)
+    main(args.dataset_dir, args.json, show_duplicate_examples=args.show_duplicates)

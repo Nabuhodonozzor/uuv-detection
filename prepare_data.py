@@ -1,7 +1,7 @@
 """Single linear data-preparation pipeline for binary UUV detection.
 
 Replaces the MFCC-10/20/40 x normal/M/W matrix in ``load_data.py`` with one
-path: manifest -> recording-level split -> log-mel features -> train-fitted
+path: manifest -> session-level split -> log-mel features -> train-fitted
 normalisation -> cached ``.npz`` per split.
 
 Run it once; training notebooks then just load the arrays.
@@ -10,12 +10,15 @@ Run it once; training notebooks then just load the arrays.
 
 Design notes (each of these fixes something diagnosed in REPORT.md):
 
-* **Split before anything else, at the recording level.** The clips are already
-  segmented upstream, so a clip's source recording is only recoverable from the
-  timestamp prefix in its filename. Every clip sharing a timestamp goes to the
-  same split, whole. Splitting a flat clip list instead - what
+* **Split before anything else, at the continuous-session level.** Two layers of
+  leakage had to be removed. Splitting a flat clip list - what
   ``common_utils.prepare_dataset`` still does - puts adjacent seconds of one
-  recording in both train and test and inflates accuracy to ~99%.
+  recording in both train and test and inflates accuracy to ~99%. Splitting by
+  filename timestamp fixes only the inner layer: QiandaoEar22 was written out in
+  ~5-minute files, so consecutive timestamps are consecutive slices of ONE
+  continuous deployment. Measured here, the 13 UUV-positive timestamps are 5
+  sessions, and all 5 UUV-M timestamps are a single 25-minute recording.
+  ``assign_sessions`` stitches contiguous timestamps back together.
 
 * **A sample rate that matches the signal.** The old MFCC settings
   (native 52734 Hz, ``n_fft=2048``, ``n_mels=256``) gave 25.75 Hz FFT bins while
@@ -47,7 +50,7 @@ from typing import Iterable
 
 import numpy as np
 
-from load_data import AUDIO_EXTENSIONS, parse_audio_filename
+from load_data import assign_sessions, discover_audio_records
 
 # --- Feature configuration ---------------------------------------------------
 # Changing any of these invalidates cached features; the values are written to
@@ -68,7 +71,7 @@ class Clip:
     """One 3-second clip plus the metadata needed to split and label it."""
 
     path: Path
-    recording_id: str   # timestamp prefix - the grouping key
+    recording_id: str   # continuous-session id - the grouping key
     is_uuv: bool
     audibility: str     # "strong" / "middle" / "weak" / "unknown", for slicing results
 
@@ -77,27 +80,28 @@ class Clip:
 
 
 def build_manifest(dataset_dirs: Iterable[str | Path]) -> list[Clip]:
-    """List every clip with its source-recording id and binary UUV label."""
+    """List every clip with its *session* id and binary UUV label.
+
+    The grouping unit is the continuous recording session, not the timestamp.
+    QiandaoEar22 was written out in ~5-minute files, so consecutive timestamps
+    are consecutive slices of one uninterrupted deployment; ``assign_sessions``
+    stitches them back together. Measured on this dataset, that turns 127
+    timestamp groups into far fewer real sessions, and the 13 UUV-positive
+    timestamps into 5 sessions.
+    """
+    records = discover_audio_records(dataset_dirs)
+    session_of = assign_sessions(records)
     clips: list[Clip] = []
-    for dataset_dir in dataset_dirs:
-        dataset_dir = Path(dataset_dir)
-        if not dataset_dir.is_dir():
-            raise FileNotFoundError(f"Dataset directory does not exist: {dataset_dir}")
-        for path in sorted(dataset_dir.rglob("*")):
-            if not path.is_file() or path.suffix.lower() not in AUDIO_EXTENSIONS:
-                continue
-            label = parse_audio_filename(path.name)
-            uuv_targets = [t for t in label.targets if t.name == "UUV"]
-            clips.append(
-                Clip(
-                    path=path,
-                    recording_id=label.timestamp_raw,
-                    is_uuv=bool(uuv_targets),
-                    audibility=uuv_targets[0].audibility if uuv_targets else "none",
-                )
+    for record in records:
+        uuv_targets = [t for t in record.label.targets if t.name == "UUV"]
+        clips.append(
+            Clip(
+                path=record.path,
+                recording_id=session_of[record.label.timestamp_raw],
+                is_uuv=bool(uuv_targets),
+                audibility=uuv_targets[0].audibility if uuv_targets else "none",
             )
-    if not clips:
-        raise ValueError("No audio files found.")
+        )
     return clips
 
 
@@ -130,7 +134,7 @@ def split_recordings(clips: list[Clip], seed: int = 42) -> dict[str, str]:
             f"Only {len(uuv_recordings)} UUV-positive recordings exist; a "
             "train/val/test split cannot give each split a positive example."
         )
-    if len(uuv_recordings) < 15:
+    if len(uuv_recordings) < 10:
         print(
             f"WARNING: only {len(uuv_recordings)} UUV-positive source recordings.\n"
             "  Held-out scores will swing by tens of F1 points depending on which\n"
