@@ -8,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-import librosa
 import numpy as np
 
 
@@ -22,7 +21,7 @@ TARGET_MODE_MAP = {"S": "single", "M": "multiple"}
 DISTANCE_MAP = {"N": "near", "M": "medium", "F": "far"}
 AUDIBILITY_MAP = {"S": "strong", "M": "middle", "W": "weak"}
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg"}
-FEATURE_FORMAT_VERSION = "2"
+FEATURE_FORMAT_VERSION = "3"
 
 
 @dataclass
@@ -140,6 +139,10 @@ def extract_mfcc(
     omit_zero_order: bool = True,
 ) -> np.ndarray:
     """Extract MFCCs with shape ``(time_frames, n_mfcc)``."""
+    # Imported lazily so the metadata half of this module (filename parsing,
+    # record discovery, grouped splitting) stays importable without librosa.
+    import librosa
+
     y, sr = librosa.load(audio_path, sr=sample_rate)
     effective_fmax = sr / 2 if fmax is None else fmax
     requested_n_mfcc = n_mfcc + 1 if omit_zero_order else n_mfcc
@@ -213,12 +216,74 @@ def discover_audio_records(dataset_dirs: Iterable[str | Path]) -> list[AudioReco
     return records
 
 
+CLIP_SECONDS = 3.0
+SESSION_GAP_TOLERANCE_SECONDS = 60.0
+
+
+def assign_sessions(
+    records: list[AudioRecord],
+    clip_seconds: float = CLIP_SECONDS,
+    tolerance_seconds: float = SESSION_GAP_TOLERANCE_SECONDS,
+) -> dict[str, str]:
+    """Map each timestamp group to the continuous recording session it belongs to.
+
+    A timestamp group is NOT an independent recording. QiandaoEar22 was captured
+    as continuous sessions and written out in ~5-minute files, so consecutive
+    timestamps are consecutive slices of one uninterrupted deployment - same
+    hydrophone, same sea state, same vessel run, often the same target only
+    seconds apart. Splitting on timestamp therefore still leaks, just at
+    5-minute granularity instead of 3-second granularity.
+
+    Two timestamp groups belong to the same session when the next one starts
+    before the previous one has finished playing out (its clip count times the
+    clip length), plus a small tolerance for recorder jitter.
+
+    Returns ``{timestamp_raw: session_id}`` where the session id is the
+    timestamp of its first group.
+    """
+    sizes: dict[str, int] = {}
+    for record in records:
+        sizes[record.label.timestamp_raw] = sizes.get(record.label.timestamp_raw, 0) + 1
+
+    sessions: dict[str, str] = {}
+    current_session: Optional[str] = None
+    previous_start: Optional[datetime] = None
+    previous_duration = 0.0
+    for timestamp in sorted(sizes):
+        start = datetime.strptime(timestamp, "%Y%m%d%H%M%S")
+        contiguous = (
+            previous_start is not None
+            and (start - previous_start).total_seconds()
+            <= previous_duration + tolerance_seconds
+        )
+        if not contiguous:
+            current_session = timestamp
+        sessions[timestamp] = current_session  # type: ignore[assignment]
+        previous_start = start
+        previous_duration = sizes[timestamp] * clip_seconds
+    return sessions
+
+
 def _group_statistics(
     records: list[AudioRecord],
+    group_key: str = "session",
 ) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray, dict[str, object]]:
+    if group_key not in {"session", "timestamp_raw"}:
+        raise ValueError("group_key must be 'session' or 'timestamp_raw'")
+    if group_key == "timestamp_raw":
+        print(
+            "WARNING: grouping by timestamp_raw leaks. Consecutive timestamps are\n"
+            "  consecutive 5-minute slices of one continuous recording session, so\n"
+            "  train and test can hold audio recorded seconds apart. Use\n"
+            "  group_key='session'."
+        )
+        session_of = {r.label.timestamp_raw: r.label.timestamp_raw for r in records}
+    else:
+        session_of = assign_sessions(records)
+
     groups: dict[str, list[AudioRecord]] = {}
     for record in records:
-        groups.setdefault(record.label.timestamp_raw, []).append(record)
+        groups.setdefault(session_of[record.label.timestamp_raw], []).append(record)
 
     timestamps = sorted(groups)
     group_sizes = np.asarray([len(groups[timestamp]) for timestamp in timestamps])
@@ -316,18 +381,24 @@ def assign_test_and_folds(
     test_size: float = 0.2,
     seed: int = 42,
     candidate_count: int = 2048,
+    group_key: str = "session",
 ) -> tuple[dict[str, str], str, dict[str, object]]:
-    """Assign complete timestamp groups to one test bucket or one CV fold."""
-    if n_splits != 4:
-        raise ValueError(
-            "This QiandaoEar22 subset requires exactly 4 CV folds because UUV-M "
-            "occurs in only 5 timestamp groups (one is reserved for the test set)."
-        )
+    """Assign complete recording sessions to one test bucket or one CV fold.
+
+    The old ``n_splits == 4`` restriction was derived from UUV-M occupying 5
+    *timestamp groups*. Those five groups are five consecutive slices of one
+    continuous 25-minute session, so grouping by session collapses UUV-M to a
+    single group and the restriction no longer describes reality. The number of
+    usable folds is now bounded by the UUV-positive session count, which
+    ``dataset_report.py`` prints.
+    """
+    if n_splits < 2:
+        raise ValueError("n_splits must be at least 2.")
     if not 0 < test_size < 1:
         raise ValueError("test_size must be between 0 and 1.")
 
     timestamps, group_sizes, group_labels, group_support, diagnostics = (
-        _group_statistics(records)
+        _group_statistics(records, group_key=group_key)
     )
     bucket_count = n_splits + 1
     if len(timestamps) < bucket_count:
@@ -436,8 +507,15 @@ def assign_test_and_folds(
         timestamp: bucket_names[int(best_assignment[index])]
         for index, timestamp in enumerate(timestamps)
     }
+    # Records are keyed by timestamp; buckets are keyed by session. Resolve
+    # through the same session map used to build the groups.
+    session_of = (
+        assign_sessions(records)
+        if group_key == "session"
+        else {r.label.timestamp_raw: r.label.timestamp_raw for r in records}
+    )
     sample_assignment = {
-        record.sample_id: timestamp_assignment[record.label.timestamp_raw]
+        record.sample_id: timestamp_assignment[session_of[record.label.timestamp_raw]]
         for record in records
     }
 
@@ -476,6 +554,7 @@ def create_mfcc_archive(
     n_mfcc: int,
     n_splits: int = 4,
     dataset_diagnostics: Optional[dict[str, object]] = None,
+    group_key: str = "session",
 ) -> Path:
     """Extract one MFCC configuration and save its fixed test/CV assignment."""
     cv_records = [record for record in records if assignment[record.sample_id] != "test"]
@@ -491,6 +570,11 @@ def create_mfcc_archive(
         else:
             cv_features.append(feature)
 
+    session_of = (
+        assign_sessions(records)
+        if group_key == "session"
+        else {r.label.timestamp_raw: r.label.timestamp_raw for r in records}
+    )
     uuv_index = CLASSES.index("UUV")
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -531,7 +615,7 @@ def create_mfcc_archive(
             dtype=np.int8,
         ),
         cv_sample_ids=np.asarray([record.sample_id for record in cv_records]),
-        cv_timestamps=np.asarray([record.label.timestamp_raw for record in cv_records]),
+        cv_timestamps=np.asarray([session_of[record.label.timestamp_raw] for record in cv_records]),
         cv_uuv_middle=np.asarray([record.uuv_middle for record in cv_records]),
         cv_uuv_weak=np.asarray([record.uuv_weak for record in cv_records]),
         test_data=_stack_features(test_features, "test"),
@@ -540,7 +624,7 @@ def create_mfcc_archive(
             [record.labels_multi[uuv_index] for record in test_records], dtype=np.int8
         ),
         test_sample_ids=np.asarray([record.sample_id for record in test_records]),
-        test_timestamps=np.asarray([record.label.timestamp_raw for record in test_records]),
+        test_timestamps=np.asarray([session_of[record.label.timestamp_raw] for record in test_records]),
         test_uuv_middle=np.asarray([record.uuv_middle for record in test_records]),
         test_uuv_weak=np.asarray([record.uuv_weak for record in test_records]),
         classes=np.asarray(CLASSES),
@@ -548,7 +632,7 @@ def create_mfcc_archive(
         n_folds=np.asarray(n_splits, dtype=np.int8),
         split_id=np.asarray(split_id),
         split_ratios=split_ratios,
-        group_key=np.asarray("timestamp_raw"),
+        group_key=np.asarray(group_key),
         dataset_diagnostics_json=np.asarray(
             json.dumps(dataset_diagnostics or {}, sort_keys=True)
         ),
@@ -565,11 +649,12 @@ def build_all_mfcc_archives(
     output_dir: str | Path,
     n_splits: int = 4,
     seed: int = 42,
+    group_key: str = "session",
 ) -> list[Path]:
     records = discover_audio_records(dataset_dirs)
     print(f"Loaded metadata for {len(records)} audio files.")
     assignment, split_id, dataset_diagnostics = assign_test_and_folds(
-        records, n_splits=n_splits, test_size=0.2, seed=seed
+        records, n_splits=n_splits, test_size=0.2, seed=seed, group_key=group_key
     )
     output_dir = Path(output_dir)
     return [
@@ -581,6 +666,7 @@ def build_all_mfcc_archives(
             n_mfcc=n_mfcc,
             n_splits=n_splits,
             dataset_diagnostics=dataset_diagnostics,
+            group_key=group_key,
         )
         for n_mfcc in (10, 20, 40)
     ]
@@ -599,6 +685,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="mfcc_datasets")
     parser.add_argument("--n-splits", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--group-key",
+        default="session",
+        choices=["session", "timestamp_raw"],
+        help="Split unit. 'timestamp_raw' leaks - see REPORT.md.",
+    )
     return parser.parse_args()
 
 
@@ -609,4 +701,5 @@ if __name__ == "__main__":
         args.output_dir,
         n_splits=args.n_splits,
         seed=args.seed,
+        group_key=args.group_key,
     )
